@@ -117,6 +117,7 @@ class Client(object):
         self._pending_data_size = 0
         self._flush_queue = None
         self._flusher_task = None
+        self._read_lock = None
         self.options = {}
         self.stats = {
             'in_msgs': 0,
@@ -151,6 +152,7 @@ class Client(object):
         self._closed_cb = closed_cb
         self._reconnected_cb = reconnected_cb
         self._disconnected_cb = disconnected_cb
+        self._read_lock = asyncio.Lock(loop=self._loop)
 
         # Customizable options
         self.options["verbose"] = verbose
@@ -862,28 +864,29 @@ class Client(object):
         and its task has to be rescheduled.
         """
         while True:
-            try:
-                should_bail = self.is_closed or self.is_reconnecting
-                if should_bail or self._io_reader is None:
-                    break
-                if self.is_connected and self._io_reader.at_eof():
-                    if self._error_cb is not None:
-                        yield from self._error_cb(ErrStaleConnection)
-                    self._process_op_err(ErrStaleConnection)
-                    break
+            with (yield from self._read_lock):
+                try:
+                    should_bail = self.is_closed or self.is_reconnecting
+                    if should_bail or self._io_reader is None:
+                        break
+                    if self.is_connected and self._io_reader.at_eof():
+                        if self._error_cb is not None:
+                            yield from self._error_cb(ErrStaleConnection)
+                        self._process_op_err(ErrStaleConnection)
+                        break
 
-                b = yield from self._io_reader.read(DEFAULT_BUFFER_SIZE)
-                yield from self._ps.parse(b)
-            except ErrProtocol:
-                self._process_op_err(ErrProtocol)
-                break
-            except OSError as e:
-                self._process_op_err(e)
-                break
-            except asyncio.CancelledError:
-                break
-            # except asyncio.InvalidStateError:
-            #     pass
+                    b = yield from self._io_reader.read(DEFAULT_BUFFER_SIZE)
+                    yield from self._ps.parse(b)
+                except ErrProtocol:
+                    self._process_op_err(ErrProtocol)
+                    break
+                except OSError as e:
+                    self._process_op_err(e)
+                    break
+                except asyncio.CancelledError:
+                    break
+                # except asyncio.InvalidStateError:
+                #     pass
 
     def __enter__(self):
         """For when NATS client is used in a context manager"""
